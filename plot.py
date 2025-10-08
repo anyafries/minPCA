@@ -1,4 +1,5 @@
 import numpy as np
+import matplotlib
 import matplotlib.pyplot as plt
 import plotly.graph_objects as go
 import plotly.io as pio
@@ -13,14 +14,16 @@ def scatter_sol(ax, xyz, col, adj=1.05):
     ax.scatter([v[0] for v in xyz], [v[1] for v in xyz], [v[2] for v in xyz], alpha=0.5, c=col)
 
 
-def plot_sol(covs, vectors, S, objective_values, plot_eigs=True):
+def plot_sol(covs, vectors, S, objective_values, plot_eigs=True,
+             title='minPCA objective values'):
     # v_pca = v_pca.detach().numpy()
     dim = covs[0].shape[0]
     
     fig = plt.figure()
     if dim == 2:
         ax = fig.add_subplot(111)
-        scatter = ax.scatter(S[:, 0], S[:, 1], c=objective_values, cmap='viridis', s=100)
+        scatter = ax.scatter(S[:, 0], S[:, 1], 
+                             c=objective_values, cmap='viridis', s=100)
         fig.colorbar(scatter, ax=ax)
         # ax.scatter(v_pca[0], v_pca[1], c='r', s=300, label="minPCA solution")
 
@@ -31,7 +34,7 @@ def plot_sol(covs, vectors, S, objective_values, plot_eigs=True):
         ax.set_zlabel('Z')
     ax.set_xlabel('X')
     ax.set_ylabel('Y')
-    ax.set_title('minPCA objective values')
+    ax.set_title(title)
     
     # for each covariance matrix, plot the eigenvectors
     if plot_eigs:
