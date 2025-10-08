@@ -7,35 +7,46 @@ import torch
 
 from scipy.optimize import minimize
 
+# ---------------- Helpers ----------------- #
+
+def orthogonalize(v):
+    """ Orthogonalize the columns of v using QR decomposition. """
+    rank = v.shape[1]
+    u, _, vh = torch.linalg.svd(v)
+    v = u[:, :rank] @ vh
+    return v
+
+
+def reshape_v(v, X):
+    """ Reshape v to have the correct number of rows based on X. """
+    p = X.shape[1]
+    return v.reshape(p, -1)
+
 # ----------------- Objective functions ----------------- #
 
 
 def f_pca(v, cov_matrix, norm_cst):
-    p = cov_matrix.shape[0]
-    v = v.reshape(p, -1)
+    v = reshape_v(v, cov_matrix)
     numerator = torch.trace(torch.mm(v.T, torch.mm(cov_matrix, v)))
     denominator = norm_cst
-    # if v.shape[1] == 1:
-    #     denominator *= torch.linalg.matrix_norm(v)**2
     return numerator / denominator
 
 
-def f_reconstruction(v, X1, norm_cst):
-    p = X1.shape[1]
-    v = v.reshape(p, -1)
-    numerator = torch.linalg.matrix_norm(X1 - X1 @ v @ v.T)**2 
-    denominator = norm_cst #* torch.linalg.matrix_norm(v)**2
+def f_reconstruction(v, X1, norm_cst, from_cov=False):
+    v = reshape_v(v, X1)
+    if from_cov:
+        numerator = torch.trace(X1) - torch.trace(v.T @ X1 @ v)
+    else:
+        numerator = torch.linalg.matrix_norm(X1 - X1 @ v @ v.T)**2 
+    denominator = norm_cst
     return numerator / denominator
 
 
 def f_minpca(v, covs, norm_csts):
-    p = covs[0].shape[0]
-    v = v.reshape(p, -1)
+    v = reshape_v(v, covs[0])
     # check if v is orthogonal
     if not torch.allclose(torch.mm(v.T, v), torch.eye(v.shape[1]), atol=1e-5):
-        rank = v.shape[1]
-        u, _, vh = torch.linalg.svd(v)
-        v = u[:, :rank] @ vh
+        v = orthogonalize(v)
     fs =[-f_pca(v, cov, norm_cst).unsqueeze(0).unsqueeze(1) 
          for cov, norm_cst in zip(covs, norm_csts)]
     fs_cat = torch.cat(fs, dim=1)  # fs_cat should now be of shape [1, N]
@@ -58,33 +69,25 @@ def f_minpca_pen(v, covs, norm_csts, c):
 
 
 def f_minpca_memory(v, covs, norm_csts, prev_values):
-    p = covs[0].shape[0]
-    v = v.reshape(p, -1)
-    rank = v.shape[1]
-    u, _, vh = torch.linalg.svd(v)
-    v = u[:, :rank] @ vh
+    v = reshape_v(v, covs[0])
+    v = orthogonalize(v)
     fs = [prev_values[i]-f_pca(v, covs[i], norm_csts[i]).unsqueeze(0).unsqueeze(1) 
           for i in range(len(covs))]
     fs_cat = torch.cat(fs, dim=1) 
     return torch.max_pool1d(fs_cat, kernel_size=len(covs))[0,0]
 
 
-def f_maxreconstruction(v, Xs, norm_csts):
-    p = Xs[0].shape[1]
-    v = v.reshape(p, -1)
-    rank = v.shape[1]
-    # get svd of v & closest orthogonal matrix to v
-    u, _, vh = torch.linalg.svd(v)
-    v = u[:, :rank] @ vh
-    fs =[f_reconstruction(v, X, norm_cst).unsqueeze(0).unsqueeze(1) 
+def f_maxreconstruction(v, Xs, norm_csts, from_cov=False):
+    v = reshape_v(v, Xs[0])
+    v = orthogonalize(v)
+    fs =[f_reconstruction(v, X, norm_cst, from_cov).unsqueeze(0).unsqueeze(1) 
          for X, norm_cst in zip(Xs, norm_csts)]
     fs_cat = torch.cat(fs, dim=1)
     return torch.max_pool1d(fs_cat, kernel_size=len(Xs))[0,0] 
 
 
 def f_fairpca(v, Xs, covs, norm_csts):
-    p = Xs[0].shape[1]
-    v = v.reshape(p, -1)
+    v = reshape_v(v, Xs[0])
     k = v.shape[1]
     opt_vs = [torch.tensor(np.linalg.eig(cov)[1][:, 0:k], dtype=torch.float32) 
               for cov in covs]
@@ -93,6 +96,25 @@ def f_fairpca(v, Xs, covs, norm_csts):
                        for i in range(len(Xs))], requires_grad=True)
     return torch.max(fs)
 
+
+def f_regret_variance(v, covs, norm_csts, opt_variances):
+    v = reshape_v(v, covs[0])
+    v = orthogonalize(v)
+    fs = [opt_variances[i] - f_pca(v, covs[i], norm_csts[i]) 
+          for i in range(len(covs))]
+    fs = [f.unsqueeze(0).unsqueeze(1) for f in fs]
+    fs_cat = torch.cat(fs, dim=1)
+    return torch.max_pool1d(fs_cat, kernel_size=len(covs))[0,0]
+
+
+def f_regret_reconstruction(v, Xs, norm_csts, opt_errors):
+    v = reshape_v(v, Xs[0])
+    v = orthogonalize(v)
+    fs = [f_reconstruction(v, Xs[i], norm_csts[i]) - opt_errors[i] 
+          for i in range(len(Xs))]
+    fs = [f.unsqueeze(0).unsqueeze(1) for f in fs]
+    fs_cat = torch.cat(fs, dim=1)
+    return torch.max_pool1d(fs_cat, kernel_size=len(Xs))[0,0]
 
 
 # ----------------- Gradient functions ----------------- #
@@ -240,7 +262,9 @@ def get_solution(v_init, params, print_out=False, lr=0.1, betas=(0.9,0.99),
         'fairpca': f_fairpca,
         'pooled': f_minpca, #lambda v, cov, norm_cst: -f_pca(v, cov, norm_cst),
         'average': f_minpca, #lambda v, cov, norm_cst: -f_pca(v, cov, norm_cst),
-        # 'joint_diag': None # Not implemented yet
+        # 'joint_diag': None # Not implemented 
+        'regret_variance': f_regret_variance,
+        'regret_reconstruction': f_regret_reconstruction
     }
     f = functions[function]
 
@@ -266,6 +290,14 @@ def get_solution(v_init, params, print_out=False, lr=0.1, betas=(0.9,0.99),
             cov += c
         cov /= len(covs)
         args = {'covs': [cov], 'norm_csts': [torch.trace(cov)]}
+    elif function == 'regret_variance':
+        args = {'covs': covs, 'norm_csts': norm_csts, 
+                'opt_variances': params['opt_variances']}
+    elif function == 'regret_reconstruction':
+        args = {'Xs': params['Xs'], 'norm_csts': norm_csts, 
+                'opt_errors': params['opt_errors']}
+    else:
+        raise ValueError(f"Function {function} not recognized")
 
     # Select the optimizer
     if method == 'Adam':

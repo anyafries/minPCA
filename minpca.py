@@ -2,16 +2,18 @@ import numpy as np
 import torch
 from minPCA.utils import get_solution, f_maxreconstruction, f_minpca, f_pca
 
-def get_errs_pca(v, params=None, params_pooled=None):
+def get_errs_pca(v, params=None, params_pooled=None, from_cov=False):
     max_training = None 
     pooled = None
     if params is not None:
-        max_training = f_maxreconstruction(v, params['Xs'], 
-                                           params['norm_csts']).detach().item()
+        arg2 = params['Xs'] if not from_cov else params['covs']
+        max_training = f_maxreconstruction(
+            v, arg2, params['norm_csts'], from_cov)
     if params_pooled is not None:
-        pooled = f_maxreconstruction(v, params_pooled['Xs'], 
-                                     params_pooled['norm_csts']).detach().item()
-    return max_training, pooled
+        arg2 = params_pooled['Xs'] if not from_cov else params_pooled['covs']
+        pooled = f_maxreconstruction(
+            v, arg2, params_pooled['norm_csts'], from_cov)
+    return max_training.detach().item(), pooled.detach().item()
 
 
 def get_vars_pca(v, params=None, params_pooled=None):
@@ -114,7 +116,8 @@ class minPCA():
     def __init__(self, n_components, function='minpca', norm=True):
         assert isinstance(n_components, int)
         assert function in ['minpca', 'minpca_pen', 'maxreconstruction',
-                            'seq', 'fairpca', 'pooled', 'average', 'regret']
+                            'seq', 'fairpca', 'pooled', 'average', 
+                            'regret_variance', 'regret_reconstruction']
         assert isinstance(norm, bool)
         self.n_components_ = n_components
         self.function_ = function
@@ -143,6 +146,18 @@ class minPCA():
         self.params_ = generate_params(Xs, norm=self.norm_, from_cov=from_cov)
         self.params_pooled_ = generate_params(Xs, pooled=True, norm=self.norm_,
                                               from_cov=from_cov)
+        if self.function_ == 'regret_variance' or 'regret_reconstruction':
+            # compute the optimal variances / errors for each environment
+            opt_variances = []
+            opt_errors = []
+            for cov, norm_cst in zip(self.params_['covs'], self.params_['norm_csts']):
+                eigvals, _ = torch.linalg.eig(cov / norm_cst)
+                eigvals = torch.real(eigvals)
+                eigvals, _ = torch.sort(eigvals, descending=True)
+                opt_variances.append(torch.sum(eigvals[:self.n_components_]).item())
+                opt_errors.append(torch.sum(eigvals[self.n_components_:]).item())
+            self.params_['opt_variances'] = opt_variances
+            self.params_['opt_errors'] = opt_errors
 
         v0 = torch.randn(self.p_, self.n_components_)
         v0 = get_solution(v0, self.params_, function=self.function_, c=0.99, 
@@ -161,12 +176,13 @@ class minPCA():
                     best_v, best_var = v_try, try_var
         self.v_ = best_v
 
-        if from_cov:
-            # TODO: can do error from the covariances!
-            self.maxerr_, self.pooled_err_ = None, None
-        else:
-            self.maxerr_, self.pooled_err_ = get_errs_pca(
-                self.v_, self.params_, params_pooled=self.params_pooled_)
+        # if from_cov:
+        #     # TODO: can do error from the covariances!
+        #     self.maxerr_, self.pooled_err_ = None, None
+        # else:
+        self.maxerr_, self.pooled_err_ = get_errs_pca(
+            self.v_, self.params_, params_pooled=self.params_pooled_, 
+            from_cov=from_cov)
         
         self.minvar_, self.pooled_var_ = get_vars_pca(
             self.v_, self.params_, params_pooled=self.params_pooled_)
