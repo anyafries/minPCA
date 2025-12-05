@@ -27,3 +27,7 @@ dependencies = [
     "scipy",
     "torch",
 ]
+
+[tool.setuptools]
+packages = ["minPCA"]
+package-dir = { "minPCA" = "minPCA" }
