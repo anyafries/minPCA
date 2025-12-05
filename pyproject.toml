@@ -1,0 +1,29 @@
+# -----------------------------------------------------------------------------
+# BUILD SYSTEM
+# -----------------------------------------------------------------------------
+
+[build-system]
+build-backend = "setuptools.build_meta"
+requires = [
+    "setuptools >=64.0.0",
+    "wheel >=0.40.0",
+]
+
+# -----------------------------------------------------------------------------
+# PROJECT METADATA
+# -----------------------------------------------------------------------------
+
+[project]
+name = "minPCA"
+version = "0.1.0"
+description = "Worst-case low rank approximation"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "GNU Affero General Public License v3.0"}
+authors = [{name = "Anya Fries", email = "anfries@stat.math.ethz.ch"}]
+keywords = ["distribution shift", "robustness", "PCA", "dimensionality reduction"]
+dependencies = [
+    "numpy",
+    "scipy",
+    "torch",
+]
