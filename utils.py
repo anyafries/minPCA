@@ -1,11 +1,57 @@
-import autograd.numpy as anp
 import numpy as np
-import pymanopt
-import pymanopt.manifolds
-import pymanopt.optimizers
 import torch
 
-from scipy.optimize import minimize
+# ----------------- Generate covairance matrices ----------------- #
+def get_random_covs(p, rank, nenvs, 
+                    a1=0.1, b1=0.9, a2=0.1, b2=0.9, 
+                    full_cov=True):
+    """
+    Generate nenvs random covariance matrices of size pxp
+    with rank `rank` shared component and rank `rank` env-specific component.
+    Eigenvalues of shared and env-specific components are preserved exactly.
+
+    Input
+    p : the size of the covariance matrix
+    rank : the rank of the covariance matrix
+    nenvs : number of environments
+    a1 : the lower bound for the eigenvalues of the shared component
+    b1 : the upper bound for the eigenvalues of the shared component
+    a2: the lower bound for the eigenvalues of the env-specific component
+    b2 : the upper bound for the eigenvalues of the env-specific component
+    full_cov : if True, return the full covariance matrix
+                otherwise, return the eigenvalues and the orthogonal matrix
+    """
+    assert full_cov, "This function only supports full_cov=True for now."
+    
+    covs = []
+
+    # 1. Generate shared eigenvalues
+    eigvals_shared = np.random.uniform(a1, b1, rank)
+    
+    # 2. Generate env-specific eigenvalues
+    eigvals_env = np.random.uniform(a2, b2, rank)
+    
+    for _ in range(nenvs):
+        # 3. Shared random orthonormal basis
+        Q0, _ = np.linalg.qr(np.random.randn(p, rank))
+        
+        # 4. Environment-specific orthonormal basis, orthogonal to Q0
+        Qi = np.random.randn(p, rank)
+        # Make orthogonal to Q0
+        Qi -= Q0 @ (Q0.T @ Qi)
+        # Orthonormalize
+        Qi, _ = np.linalg.qr(Qi)
+        
+        # 5. Stack into single orthonormal basis
+        Qtilde = np.concatenate([Q0, Qi], axis=1)  # p x 2*rank
+        Lambda_tilde = np.diag(np.concatenate([eigvals_shared, eigvals_env]))
+        
+        # 6. Construct covariance
+        C = Qtilde @ Lambda_tilde @ Qtilde.T
+        covs.append(C)
+        
+    return [C / np.linalg.trace(C) for C in covs]
+
 
 # ---------------- Helpers ----------------- #
 
@@ -32,12 +78,15 @@ def f_pca(v, cov_matrix, norm_cst):
     return numerator / denominator
 
 
-def f_reconstruction(v, X1, norm_cst, from_cov=False):
-    v = reshape_v(v, X1)
-    if from_cov:
-        numerator = torch.trace(X1) - torch.trace(v.T @ X1 @ v)
-    else:
-        numerator = torch.linalg.matrix_norm(X1 - X1 @ v @ v.T)**2 
+def f_reconstruction(v, cov_matrix, norm_cst, from_cov=False):
+    if not from_cov:
+        raise ValueError("from_cov=False not implemented yet")
+    v = reshape_v(v, cov_matrix)
+    # if from_cov:
+    #     numerator = torch.trace(X1) - torch.trace(v.T @ X1 @ v)
+    # else:
+    #     numerator = torch.linalg.matrix_norm(X1 - X1 @ v @ v.T)**2 
+    numerator = torch.trace(cov_matrix) - torch.trace(v.T @ cov_matrix @ v)
     denominator = norm_cst
     return numerator / denominator
 
@@ -77,44 +126,45 @@ def f_minpca_memory(v, covs, norm_csts, prev_values):
     return torch.max_pool1d(fs_cat, kernel_size=len(covs))[0,0]
 
 
-def f_maxreconstruction(v, Xs, norm_csts, from_cov=False):
-    v = reshape_v(v, Xs[0])
-    v = orthogonalize(v)
+def f_maxreconstruction(v, covs, norm_csts, from_cov=False):
+    v = reshape_v(v, covs[0])
+    if not torch.allclose(torch.mm(v.T, v), torch.eye(v.shape[1]), atol=1e-5):
+        v = orthogonalize(v)
     fs =[f_reconstruction(v, X, norm_cst, from_cov).unsqueeze(0).unsqueeze(1) 
-         for X, norm_cst in zip(Xs, norm_csts)]
+         for X, norm_cst in zip(covs, norm_csts)]
     fs_cat = torch.cat(fs, dim=1)
-    return torch.max_pool1d(fs_cat, kernel_size=len(Xs))[0,0] 
+    return torch.max_pool1d(fs_cat, kernel_size=len(covs))[0,0] 
 
 
-def f_fairpca(v, Xs, covs, norm_csts):
-    v = reshape_v(v, Xs[0])
-    k = v.shape[1]
-    opt_vs = [torch.tensor(np.linalg.eig(cov)[1][:, 0:k], dtype=torch.float32) 
-              for cov in covs]
-    fs = torch.tensor([f_reconstruction(v, Xs[i], norm_csts[i]) - 
-                       f_reconstruction(opt_vs[i], Xs[i], norm_csts[i]) 
-                       for i in range(len(Xs))], requires_grad=True)
-    return torch.max(fs)
+# def f_fairpca(v, Xs, covs, norm_csts):
+#     v = reshape_v(v, Xs[0])
+#     k = v.shape[1]
+#     opt_vs = [torch.tensor(np.linalg.eig(cov)[1][:, 0:k], dtype=torch.float32) 
+#               for cov in covs]
+#     fs = torch.tensor([f_reconstruction(v, Xs[i], norm_csts[i]) - 
+#                        f_reconstruction(opt_vs[i], Xs[i], norm_csts[i]) 
+#                        for i in range(len(Xs))], requires_grad=True)
+#     return torch.max(fs)
 
 
-def f_regret_variance(v, covs, norm_csts, opt_variances):
+def f_regret_variance(v, covs, norm_csts, opt_vals):
     v = reshape_v(v, covs[0])
     v = orthogonalize(v)
-    fs = [opt_variances[i] - f_pca(v, covs[i], norm_csts[i]) 
+    fs = [opt_vals[i] - f_pca(v, covs[i], norm_csts[i]) 
           for i in range(len(covs))]
     fs = [f.unsqueeze(0).unsqueeze(1) for f in fs]
     fs_cat = torch.cat(fs, dim=1)
     return torch.max_pool1d(fs_cat, kernel_size=len(covs))[0,0]
 
 
-def f_regret_reconstruction(v, Xs, norm_csts, opt_errors):
-    v = reshape_v(v, Xs[0])
+def f_regret_reconstruction(v, covs, norm_csts, opt_vals):
+    v = reshape_v(v, covs[0])
     v = orthogonalize(v)
-    fs = [f_reconstruction(v, Xs[i], norm_csts[i]) - opt_errors[i] 
-          for i in range(len(Xs))]
+    fs = [f_reconstruction(v, covs[i], norm_csts[i], from_cov=True) - opt_vals[i] 
+          for i in range(len(covs))]
     fs = [f.unsqueeze(0).unsqueeze(1) for f in fs]
     fs_cat = torch.cat(fs, dim=1)
-    return torch.max_pool1d(fs_cat, kernel_size=len(Xs))[0,0]
+    return torch.max_pool1d(fs_cat, kernel_size=len(covs))[0,0]
 
 
 # ----------------- Gradient functions ----------------- #
@@ -259,7 +309,7 @@ def get_solution(v_init, params, print_out=False, lr=0.1, betas=(0.9,0.99),
         'minpca': f_minpca, 
         'minpca_pen': f_minpca_pen,
         'maxreconstruction': f_maxreconstruction, 
-        'fairpca': f_fairpca,
+        # 'fairpca': f_fairpca,
         'pooled': f_minpca, #lambda v, cov, norm_cst: -f_pca(v, cov, norm_cst),
         'average': f_minpca, #lambda v, cov, norm_cst: -f_pca(v, cov, norm_cst),
         # 'joint_diag': None # Not implemented 
@@ -273,12 +323,14 @@ def get_solution(v_init, params, print_out=False, lr=0.1, betas=(0.9,0.99),
     norm_csts = params['norm_csts'] #[torch.trace(cov) for cov in covs]
     if function == 'minpca':
         args = {'covs': covs, 'norm_csts': norm_csts}
+    elif function == 'maxreconstruction':
+        args = {'covs': covs, 'norm_csts': norm_csts, 'from_cov': True}
     elif function == 'minpca_pen':
         args = {'covs': covs, 'norm_csts': norm_csts, 'c': c}
-    elif function == 'maxreconstruction':
-        args = {'Xs': params['Xs'], 'norm_csts': norm_csts}
-    elif function == 'fairpca':
-        args = params
+    # elif function == 'maxreconstruction':
+    #     args = {'Xs': params['Xs'], 'norm_csts': norm_csts}
+    # elif function == 'fairpca':
+    #     args = params
     elif function == 'pooled':
         Xs = torch.cat(params['Xs'], dim=0)
         cov = torch.matmul(Xs.T, Xs) 
@@ -290,12 +342,9 @@ def get_solution(v_init, params, print_out=False, lr=0.1, betas=(0.9,0.99),
             cov += c
         cov /= len(covs)
         args = {'covs': [cov], 'norm_csts': [torch.trace(cov)]}
-    elif function == 'regret_variance':
+    elif function in ['regret_variance', 'regret_reconstruction']:
         args = {'covs': covs, 'norm_csts': norm_csts, 
-                'opt_variances': params['opt_variances']}
-    elif function == 'regret_reconstruction':
-        args = {'Xs': params['Xs'], 'norm_csts': norm_csts, 
-                'opt_errors': params['opt_errors']}
+                'opt_vals': params['opt_vals']}
     else:
         raise ValueError(f"Function {function} not recognized")
 
@@ -330,26 +379,3 @@ def get_solution(v_init, params, print_out=False, lr=0.1, betas=(0.9,0.99),
     u, _, vh = torch.linalg.svd(v)
     v = u[:, :rank] @ vh
     return v #/ torch.linalg.vector_norm(v)
-
-
-PYOPTMAN_OPTIMIZERS = { 'SteepestDescent': pymanopt.optimizers.SteepestDescent(), 
-                        'ConjugateGradient': pymanopt.optimizers.ConjugateGradient(),
-                        'TrustRegions': pymanopt.optimizers.TrustRegions(),
-                        'NelderMead': pymanopt.optimizers.NelderMead(),
-                        'ParticleSwarm': pymanopt.optimizers.ParticleSwarm()}
-
-
-def get_solution_pyoptman(cov1, cov2, dim=3, optimizer=pymanopt.optimizers.SteepestDescent()):
-    cov1, cov2 = anp.array(cov1), anp.array(cov2)
-    manifold = pymanopt.manifolds.Sphere(dim)
-
-    @pymanopt.function.autograd(manifold)
-    def cost(point):
-        v1 = -point @ cov1 @ point / anp.trace(cov1)
-        v2 = -point @ cov2 @ point / anp.trace(cov2)
-        return anp.max(anp.array([v1, v2]))
-
-    problem = pymanopt.Problem(manifold, cost)
-    result = optimizer.run(problem)
-    return result.point
-

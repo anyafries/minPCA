@@ -9,11 +9,13 @@ def get_errs_pca(v, params=None, params_pooled=None, from_cov=False):
         arg2 = params['Xs'] if not from_cov else params['covs']
         max_training = f_maxreconstruction(
             v, arg2, params['norm_csts'], from_cov)
+        max_training = max_training.detach().item()
     if params_pooled is not None:
         arg2 = params_pooled['Xs'] if not from_cov else params_pooled['covs']
         pooled = f_maxreconstruction(
             v, arg2, params_pooled['norm_csts'], from_cov)
-    return max_training.detach().item(), pooled.detach().item()
+        pooled = pooled.detach().item()
+    return max_training, pooled
 
 
 def get_vars_pca(v, params=None, params_pooled=None):
@@ -28,7 +30,7 @@ def get_vars_pca(v, params=None, params_pooled=None):
     return max_training, pooled
 
 
-def generate_params(Xs, pooled=False, norm=True, from_cov=False):
+def generate_params(Xs, pooled=False, norm=True, from_cov=False, center=True):
     if isinstance(Xs[0], np.ndarray):
         Xs = [torch.from_numpy(X).float() for X in Xs]
     # if from_cov is True, we assume that Xs are covariance matrices
@@ -42,8 +44,9 @@ def generate_params(Xs, pooled=False, norm=True, from_cov=False):
     else:
         if pooled:
             Xs = [torch.cat(Xs, dim=0)]
-        Xs_centred = [X - X.mean(dim=0) for X in Xs]
-        covs = [X.t() @ X  for X in Xs_centred]
+        if center:
+            Xs = [X - X.mean(dim=0) for X in Xs]
+        covs = [torch.cov(X.t())  for X in Xs]
 
     # if norm is True, we normalize the covariance matrices by their trace
     if norm: 
@@ -51,7 +54,7 @@ def generate_params(Xs, pooled=False, norm=True, from_cov=False):
     else: 
         norm_csts = [1] * len(covs)
 
-    params = {'Xs': Xs_centred, 'covs': covs, 'norm_csts': norm_csts}
+    params = {'Xs': Xs, 'covs': covs, 'norm_csts': norm_csts}
     return params
 
 
@@ -66,7 +69,8 @@ class minPCA():
         Number of components to keep.
     function : str, default='minpca'
         The function to optimize. One of ['minpca', 'minpca_pen', 
-        'maxreconstruction', 'seq', 'fairpca', 'pooled', 'average']
+        'maxreconstruction', 'seq', 'fairpca', 'pooled', 'average',
+        'regret_variance', 'regret_reconstruction']
     norm : bool, default=True
         Whether to normalize the covariance matrices by their trace.
     
@@ -116,7 +120,7 @@ class minPCA():
     def __init__(self, n_components, function='minpca', norm=True):
         assert isinstance(n_components, int)
         assert function in ['minpca', 'minpca_pen', 'maxreconstruction',
-                            'seq', 'fairpca', 'pooled', 'average', 
+                            'seq', 'pooled', 'average', #'fairpca', 
                             'regret_variance', 'regret_reconstruction']
         assert isinstance(norm, bool)
         self.n_components_ = n_components
@@ -124,7 +128,8 @@ class minPCA():
         self.norm_ = norm
 
     def fit(self, Xs, n_iters=500, lr=0.1, betas=(0.9, 0.99), method='Adam',
-            from_cov=False, n_restarts=5):
+            from_cov=False, n_restarts=5, verbose=False):
+        assert from_cov, "`from_cov=True` is currently required."
         assert isinstance(Xs, list)
         assert len(set(X.shape[1] for X in Xs)) == 1
         if (Xs[0].shape[0] == Xs[0].shape[1]) and not from_cov:
@@ -146,18 +151,19 @@ class minPCA():
         self.params_ = generate_params(Xs, norm=self.norm_, from_cov=from_cov)
         self.params_pooled_ = generate_params(Xs, pooled=True, norm=self.norm_,
                                               from_cov=from_cov)
-        if self.function_ == 'regret_variance' or 'regret_reconstruction':
+        
+        if self.function_ in ['regret_variance', 'regret_reconstruction']:
             # compute the optimal variances / errors for each environment
-            opt_variances = []
-            opt_errors = []
+            opt_vals = []
             for cov, norm_cst in zip(self.params_['covs'], self.params_['norm_csts']):
                 eigvals, _ = torch.linalg.eig(cov / norm_cst)
                 eigvals = torch.real(eigvals)
                 eigvals, _ = torch.sort(eigvals, descending=True)
-                opt_variances.append(torch.sum(eigvals[:self.n_components_]).item())
-                opt_errors.append(torch.sum(eigvals[self.n_components_:]).item())
-            self.params_['opt_variances'] = opt_variances
-            self.params_['opt_errors'] = opt_errors
+                if self.function_ == 'regret_variance':
+                    opt_vals.append(torch.sum(eigvals[:self.n_components_]).item())
+                else: 
+                    opt_vals.append(torch.sum(eigvals[self.n_components_:]).item())
+            self.params_['opt_vals'] = opt_vals
 
         v0 = torch.randn(self.p_, self.n_components_)
         v0 = get_solution(v0, self.params_, function=self.function_, c=0.99, 
@@ -172,7 +178,7 @@ class minPCA():
                                   lr=lr, betas=betas, method=method)
                 try_var = get_vars_pca(v_try, self.params_)[0]
                 if best_var < try_var:
-                    print(f"\timproving from {best_var:.3f} to {try_var:.3f}")
+                    if verbose: print(f"\timproving from {best_var:.3f} to {try_var:.3f}")
                     best_v, best_var = v_try, try_var
         self.v_ = best_v
 
