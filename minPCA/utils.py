@@ -149,7 +149,8 @@ def f_maxreconstruction(v, covs, norm_csts, from_cov=False):
 
 def f_regret_variance(v, covs, norm_csts, opt_vals):
     v = reshape_v(v, covs[0])
-    v = orthogonalize(v)
+    if not torch.allclose(torch.mm(v.T, v), torch.eye(v.shape[1]), atol=1e-5):
+        v = orthogonalize(v)
     fs = [opt_vals[i] - f_pca(v, covs[i], norm_csts[i]) 
           for i in range(len(covs))]
     fs = [f.unsqueeze(0).unsqueeze(1) for f in fs]
@@ -159,7 +160,9 @@ def f_regret_variance(v, covs, norm_csts, opt_vals):
 
 def f_regret_reconstruction(v, covs, norm_csts, opt_vals):
     v = reshape_v(v, covs[0])
-    v = orthogonalize(v)
+    # check if v is orthogonal
+    if not torch.allclose(torch.mm(v.T, v), torch.eye(v.shape[1]), atol=1e-5):
+        v = orthogonalize(v)
     fs = [f_reconstruction(v, covs[i], norm_csts[i], from_cov=True) - opt_vals[i] 
           for i in range(len(covs))]
     fs = [f.unsqueeze(0).unsqueeze(1) for f in fs]
@@ -265,7 +268,8 @@ def get_solution_seq_minpca_memory(params, norm_csts, lr=0.1, betas=(0.9,0.99),
         prev_values[i]-f_pca(v, params['covs'][i], params['norm_csts'][i]) 
         for i in range(len(prev_values))
     ]
-    if params['Xs'] is not None:
+    # check if Xs is in params
+    if 'Xs' in params and params['Xs'] is not None:
         updated_Xs = [X - torch.mm(X, torch.mm(v, v.t())) for X in params['Xs']]
         updated_covs = [X.t() @ X for X in updated_Xs]
     else:
@@ -308,12 +312,12 @@ def get_solution(v_init, params, print_out=False, lr=0.1, betas=(0.9,0.99),
     functions = {
         'minpca': f_minpca, 
         'minpca_pen': f_minpca_pen,
-        'maxreconstruction': f_maxreconstruction, 
+        'maxrcs': f_maxreconstruction, 
         # 'fairpca': f_fairpca,
         'pooled': f_minpca, #lambda v, cov, norm_cst: -f_pca(v, cov, norm_cst),
         'average': f_minpca, #lambda v, cov, norm_cst: -f_pca(v, cov, norm_cst),
         # 'joint_diag': None # Not implemented 
-        'regret_variance': f_regret_variance,
+        'maxregret': f_regret_variance,
         'regret_reconstruction': f_regret_reconstruction
     }
     f = functions[function]
@@ -323,7 +327,7 @@ def get_solution(v_init, params, print_out=False, lr=0.1, betas=(0.9,0.99),
     norm_csts = params['norm_csts'] #[torch.trace(cov) for cov in covs]
     if function == 'minpca':
         args = {'covs': covs, 'norm_csts': norm_csts}
-    elif function == 'maxreconstruction':
+    elif function == 'maxrcs':
         args = {'covs': covs, 'norm_csts': norm_csts, 'from_cov': True}
     elif function == 'minpca_pen':
         args = {'covs': covs, 'norm_csts': norm_csts, 'c': c}
@@ -342,7 +346,7 @@ def get_solution(v_init, params, print_out=False, lr=0.1, betas=(0.9,0.99),
             cov += c
         cov /= len(covs)
         args = {'covs': [cov], 'norm_csts': [torch.trace(cov)]}
-    elif function in ['regret_variance', 'regret_reconstruction']:
+    elif function in ['maxregret', 'regret_reconstruction']:
         args = {'covs': covs, 'norm_csts': norm_csts, 
                 'opt_vals': params['opt_vals']}
     else:
@@ -379,3 +383,6 @@ def get_solution(v_init, params, print_out=False, lr=0.1, betas=(0.9,0.99),
     u, _, vh = torch.linalg.svd(v)
     v = u[:, :rank] @ vh
     return v #/ torch.linalg.vector_norm(v)
+
+# Alias for backwards compatibility
+f_maxrcs = f_maxreconstruction

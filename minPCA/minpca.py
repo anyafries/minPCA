@@ -1,18 +1,26 @@
 import numpy as np
 import torch
-from minPCA.utils import get_solution, f_maxreconstruction, f_minpca, f_pca
+from minPCA.utils import get_solution, f_maxrcs, f_minpca, f_pca
+
+
+def _to_torch(Xs):
+    """Convert list of numpy arrays to list of torch tensors."""
+    if isinstance(Xs[0], np.ndarray):
+        return [torch.from_numpy(X).float() for X in Xs]
+    return Xs
+
 
 def get_errs_pca(v, params=None, params_pooled=None, from_cov=False):
     max_training = None 
     pooled = None
     if params is not None:
         arg2 = params['Xs'] if not from_cov else params['covs']
-        max_training = f_maxreconstruction(
+        max_training = f_maxrcs(
             v, arg2, params['norm_csts'], from_cov)
         max_training = max_training.detach().item()
     if params_pooled is not None:
         arg2 = params_pooled['Xs'] if not from_cov else params_pooled['covs']
-        pooled = f_maxreconstruction(
+        pooled = f_maxrcs(
             v, arg2, params_pooled['norm_csts'], from_cov)
         pooled = pooled.detach().item()
     return max_training, pooled
@@ -31,8 +39,7 @@ def get_vars_pca(v, params=None, params_pooled=None):
 
 
 def generate_params(Xs, pooled=False, norm=True, from_cov=False, center=True):
-    if isinstance(Xs[0], np.ndarray):
-        Xs = [torch.from_numpy(X).float() for X in Xs]
+    Xs = _to_torch(Xs)
     # if from_cov is True, we assume that Xs are covariance matrices
     if from_cov:
         covs = Xs
@@ -46,7 +53,7 @@ def generate_params(Xs, pooled=False, norm=True, from_cov=False, center=True):
             Xs = [torch.cat(Xs, dim=0)]
         if center:
             Xs = [X - X.mean(dim=0) for X in Xs]
-        covs = [torch.cov(X.t())  for X in Xs]
+        covs = [torch.cov(X.t(), correction=0)  for X in Xs]
 
     # if norm is True, we normalize the covariance matrices by their trace
     if norm: 
@@ -54,7 +61,9 @@ def generate_params(Xs, pooled=False, norm=True, from_cov=False, center=True):
     else: 
         norm_csts = [1] * len(covs)
 
-    params = {'Xs': Xs, 'covs': covs, 'norm_csts': norm_csts}
+    params = {'covs': covs, 'norm_csts': norm_csts}
+    if not from_cov:
+        params['Xs'] = Xs
     return params
 
 
@@ -68,9 +77,17 @@ class minPCA():
     n_components : int
         Number of components to keep.
     function : str, default='minpca'
-        The function to optimize. One of ['minpca', 'minpca_pen', 
-        'maxreconstruction', 'seq', 'fairpca', 'pooled', 'average',
-        'regret_variance', 'regret_reconstruction']
+        The function to optimize. 
+        Options are:
+        - 'minpca': minimize the worst-case (normalized) explained variance
+        - 'maxrcs': maximize the worst-case (normalized) reconstruction error
+        - 'maxregret': maximize the worst-case (normalized) regret 
+        Development options (not fully tested):
+        - 'seq': sequential minPCA components
+        - 'pooled': PCA on the pooled covariance matrix
+        - 'average': PCA on the average covariance matrix
+        - 'minpca_pen': penalized minPCA
+        - 'regret_reconstruction': minimize the worst-case reconstruction regret
     norm : bool, default=True
         Whether to normalize the covariance matrices by their trace.
     
@@ -118,54 +135,57 @@ class minPCA():
 
     """
     def __init__(self, n_components, function='minpca', norm=True):
-        assert isinstance(n_components, int)
-        assert function in ['minpca', 'minpca_pen', 'maxreconstruction',
-                            'seq', 'pooled', 'average', #'fairpca', 
-                            'regret_variance', 'regret_reconstruction']
-        assert isinstance(norm, bool)
+        # Initial checks
+        assert isinstance(n_components, int), "`n_components` should be an integer."
+        base_functions = ['minpca', 'maxrcs','maxregret']
+        development_functions = [
+            'seq', 'pooled', 'average', #'fairpca', 
+            'minpca_pen', 'regret_reconstruction'
+        ]
+        assert function in base_functions + development_functions, \
+            f"function '{function}' not recognized."
+        if function in development_functions:
+            print(f"Warning: function '{function}' is in development mode.")
+        assert isinstance(norm, bool), "`norm` should be a boolean."
+
         self.n_components_ = n_components
         self.function_ = function
         self.norm_ = norm
 
     def fit(self, Xs, n_iters=500, lr=0.1, betas=(0.9, 0.99), method='Adam',
-            from_cov=False, n_restarts=5, verbose=False):
-        assert from_cov, "`from_cov=True` is currently required."
+            n_restarts=5, verbose=False, v0=None):
         assert isinstance(Xs, list)
         assert len(set(X.shape[1] for X in Xs)) == 1
-        if (Xs[0].shape[0] == Xs[0].shape[1]) and not from_cov:
-            print("Warning: the input data is square. This is not a problem, but ",
-                  "it is not the usual case. \nIf you want to use covariance ",
-                  "matrices, set `from_cov=True`.")
-        if isinstance(Xs[0], np.ndarray):
-            Xs = [torch.from_numpy(X).float() for X in Xs]
+        Xs = _to_torch(Xs)
 
         self.K_ = len(Xs)
         self.p_ = Xs[0].shape[1]
-        if from_cov: 
-            self.Xs, self.means_, self.pooled_mean_ = None, None, None
-        else: 
-            self.Xs = Xs
-            self.means_ = [X.mean(dim=0) for X in Xs]
-            self.pooled_mean_ = torch.cat(Xs, dim=0).mean(dim=0)
+        self.Xs, self.means_, self.pooled_mean_ = None, None, None
 
-        self.params_ = generate_params(Xs, norm=self.norm_, from_cov=from_cov)
+        self.params_ = generate_params(Xs, norm=self.norm_, from_cov=True)
         self.params_pooled_ = generate_params(Xs, pooled=True, norm=self.norm_,
-                                              from_cov=from_cov)
+                                              from_cov=True)
         
-        if self.function_ in ['regret_variance', 'regret_reconstruction']:
+        if self.function_ in ['maxregret', 'regret_reconstruction']:
             # compute the optimal variances / errors for each environment
             opt_vals = []
             for cov, norm_cst in zip(self.params_['covs'], self.params_['norm_csts']):
                 eigvals, _ = torch.linalg.eig(cov / norm_cst)
                 eigvals = torch.real(eigvals)
                 eigvals, _ = torch.sort(eigvals, descending=True)
-                if self.function_ == 'regret_variance':
+                if self.function_ == 'maxregret':
                     opt_vals.append(torch.sum(eigvals[:self.n_components_]).item())
                 else: 
                     opt_vals.append(torch.sum(eigvals[self.n_components_:]).item())
             self.params_['opt_vals'] = opt_vals
 
-        v0 = torch.randn(self.p_, self.n_components_)
+        if v0 is None: 
+            v0 = torch.randn(self.p_, self.n_components_)
+        else:
+            if isinstance(v0, np.ndarray):
+                v0 = torch.from_numpy(v0).float()
+            assert v0.shape == (self.p_, self.n_components_), \
+                f"v0 should have shape ({self.p_}, {self.n_components_}), but got {v0.shape}."
         v0 = get_solution(v0, self.params_, function=self.function_, c=0.99, 
                                rank=self.n_components_, n_iters=n_iters,
                                lr=lr, betas=betas, method=method)
@@ -182,13 +202,9 @@ class minPCA():
                     best_v, best_var = v_try, try_var
         self.v_ = best_v
 
-        # if from_cov:
-        #     # TODO: can do error from the covariances!
-        #     self.maxerr_, self.pooled_err_ = None, None
-        # else:
         self.maxerr_, self.pooled_err_ = get_errs_pca(
-            self.v_, self.params_, params_pooled=self.params_pooled_, 
-            from_cov=from_cov)
+            self.v_, self.params_, params_pooled=self.params_pooled_,
+            from_cov=True)
         
         self.minvar_, self.pooled_var_ = get_vars_pca(
             self.v_, self.params_, params_pooled=self.params_pooled_)
@@ -304,79 +320,18 @@ class minPCA():
             return self.v_
 
 
-    def reconstruct(self, X):
-        if isinstance(X, torch.Tensor):
-            X = [X]
-        assert isinstance(X, list)
-        X_means = [x.mean(dim=0) for x in X]
-        X_centre = [x - mean for x, mean in zip(X, X_means)]    
-        return [x @ self.v_ @ self.v_.t() + mean 
-                for x, mean in zip(X_centre, X_means)]
-    
-
     def maxerr(self): 
         # TODO: also get index
         return self.maxerr_
     
+
     def pooled_err(self):
         return self.pooled_err_
     
-    def all_rcs_errs(self):
-        # TODO
-        return 
-    
+
     def minvar(self):
         return self.minvar_
     
+
     def pooled_var(self):
         return self.pooled_var_
-    
-    def all_explained_vars(self, pooled=False):
-        """
-        Returns the explained variance for the rank i=1...n_components_ solutions.
-        If `pooled` is True, returns the pooled explained variance.
-        Otherwise, returns the minimum explained variance over the environments.
-        """
-        if pooled:
-            return self.cumsum_pooled_var_
-        else:
-            return self.cumsum_minvar_
-
-    # TODO: I DONT LIKE>>>FIX
-    def get_rcs_errs(self, test_params=None):
-        if test_params is None:
-            return get_errs_pca(self.v_, self.params_, self.params_pooled_)
-        else:
-            return get_errs_pca(self.v_, **test_params)
-    
-
-    def get_explained_vars(self, test_params=None, all=True, rank=None):
-        """
-        If not `all`: Returns the minimum explained variance over the environments
-            and the pooled explained variance.
-        If `all`: Returns the explained variance for each environment
-            for the rank n_components_ solution or given `rank`.
-        """
-        # get the minimum explained variance over the environments
-        # and the pooled explained variance
-        if not all:
-            if test_params is None:
-                return get_vars_pca(self.v_, self.params_, self.params_pooled_)
-            else:
-                return get_vars_pca(self.v_, **test_params)
-            
-        # if `all`: for each environment, get the explained variance
-        else:
-            if rank is None:
-                rank = self.n_components_
-            assert rank <= self.n_components_
-            explained_vars = [
-                f_pca(self.v_[:,:rank], cov, norm_cst).item()
-                for cov, norm_cst in zip(self.params_['covs'], 
-                                         self.params_['norm_csts'])
-            ]
-            return explained_vars
-
-    # err1, _, err2 = get_errs_pca(v, params, params_pooled=params_pooled)
-    # var1 = -f_minpca(v, params['covs'], params['norm_csts'])
-    # var2 = -f_minpca(v, params_pooled['covs'], params_pooled['norm_csts'])
