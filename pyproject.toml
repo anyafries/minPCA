@@ -24,7 +24,6 @@ authors = [{name = "Anya Fries", email = "anfries@stat.math.ethz.ch"}]
 keywords = ["distribution shift", "robustness", "PCA", "dimensionality reduction"]
 dependencies = [
     "numpy",
-    "scipy",
     "torch",
 ]
 

@@ -35,31 +35,37 @@ Set-up
 p = 20              # number of covariances
 n_components = 5    # true rank of covariance
 n_envs = 5          # number of environments
+n = 5000            # number of observations to draw
 
 # Generate covariance matrices
 covs = get_random_covs(p=p, rank=5, nenvs=n_envs)
 
 # Sample from them
-Xs = [np.random.multivariate_normal(mean=np.zeros(p), cov=cov, size=100000) 
+Xs = [np.random.multivariate_normal(mean=np.zeros(p), cov=cov, size=n) 
       for cov in covs]
 ```
 
 Solve minPCA
-* `function` is one of 'minpca', 'maxreconstruction'
+* `function` is one of 'minpca', 'maxrcs', 'maxregret'
 * argument `norm` can be set to True or False for the normalized versions (default)
+* to fit empirical losses, simply use the empirical covariances as input to `fit()`.
 ```python
 minpca = minPCA(n_components=n_components, function='maxreconstruction')
-minpca = minpca.fit(covs, from_cov=True)
+minpca = minpca.fit(covs)
 
 # errors/variance on the covariance matrices
 print(f"Maximum (population) error: {minpca.maxerr():.3f}")
 print(f"Minimum (population) variance: {minpca.minvar():.3f}")
 
 # access the projection
-components = minpca.v_.detach().numpy()
+components = minpca.components()
+# reconstruct data with the projection
 Xs_reconstructed = [Xs[i] @ components @ components.T for i in range(n_envs)]
 
 # compute errors in finite sample
-errs = [np.linalg.matrix_norm(Xs[i] - Xs_reconstructed[i], ord='fro')**2 / 100000 for i in range(n_envs)]
+errs = [
+      np.linalg.matrix_norm(Xs[i] - Xs_reconstructed[i], ord='fro')**2 / n 
+      for i in range(n_envs)
+]
 print(f"Maximum (sample) error: {max(errs):.3f}")
 ```
