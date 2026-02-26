@@ -208,17 +208,31 @@ class minPCA():
                                rank=self.n_components_, n_iters=n_iters,
                                lr=lr, betas=betas, method=method)
         best_v = v0
-        if n_restarts > 1:
+        if self.function_ in BASE_FUNCTIONS:
             best_score = _get_score(v0, self.params_, self.function_)
+
+        # multiple restarts to avoid local minima, only for the main functions
+        if n_restarts > 1:
             for _ in range(n_restarts - 1):
                 v_try = torch.randn(self.p_, self.n_components_)
-                v_try = get_solution(v_try, self.params_, function=self.function_, c=0.99, 
+                v_try = get_solution(v_try, self.params_, function=self.function_, c=0.99,
                                   rank=self.n_components_, n_iters=n_iters,
                                   lr=lr, betas=betas, method=method)
                 score_try = _get_score(v_try, self.params_, self.function_)
                 if score_try < best_score:
                     if verbose: print(f"\timproving from {best_score:.3f} to {score_try:.3f}")
                     best_v, best_score = v_try, score_try
+
+        # comparison to pool PCA
+        if self.function_ in BASE_FUNCTIONS:
+            cov_pooled = self.params_pooled_['covs'][0] / self.params_pooled_['norm_csts'][0]
+            _, eigvecs_pooled = torch.linalg.eigh(cov_pooled)  # ascending order, real by construction
+            v_pooled = eigvecs_pooled[:, -self.n_components_:].flip(dims=[1])
+            pool_score = _get_score(v_pooled, self.params_, self.function_)
+            if pool_score < best_score:
+                if verbose: print(f"\tPool PCA improves score from {best_score:.3f} to {pool_score:.3f}. Using pool PCA solution.")
+                best_v = v_pooled
+
         self.v_ = best_v
 
         self.maxerr_, self.pooled_err_ = get_errs_pca(
